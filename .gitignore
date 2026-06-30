@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Local environment/config secrets
+.env
+.env.*
+config/report-config.json
+config/report-config.*.json
+!config/report-config.example.json
+
+# Generated outputs (may include internal issue data)
+Result/*
+!Result/.gitkeep
+
+# Local tooling artifacts
+claude-install.sh
+*.log
+
+# IDE
+.idea/
+.vscode/

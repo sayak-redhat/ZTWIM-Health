@@ -1,0 +1,12 @@
+{
+  "jira_base": "https://redhat.atlassian.net",
+  "jira_email": "you@redhat.com",
+  "jira_token": "your-jira-api-token",
+  "jira_sfdc_field": "",
+  "anthropic_api_key": "",
+  "claude_model": "claude-opus-4-6",
+  "claude_use_vertex": true,
+  "anthropic_vertex_project_id": "itpc-gcp-hcm-pe-eng-claude",
+  "cloud_ml_region": "global",
+  "anthropic_model": "claude-opus-4-6"
+}
