@@ -61,8 +61,104 @@ def _to_date(value):
     return datetime.strptime(str(value), "%Y-%m-%d").date()
 
 
+def _apply_visual_theme() -> None:
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+            color: #111827;
+        }
+        h1, h2, h3 {
+            color: #111827;
+        }
+        p, li, label {
+            color: #1f2937;
+        }
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #1f2937 0%, #111827 100%);
+        }
+        [data-testid="stSidebar"] * {
+            color: #e5e7eb;
+        }
+        [data-testid="stSidebar"] .stButton > button {
+            background: linear-gradient(90deg, #ee0000, #f97316);
+            color: #ffffff;
+            border: none;
+        }
+        [data-testid="stMetric"] {
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-left: 4px solid #ee0000;
+            border-radius: 12px;
+            padding: 12px 14px;
+            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+        }
+        [data-testid="stMetricLabel"] {
+            color: #4b5563;
+            font-weight: 600;
+        }
+        [data-testid="stMetricValue"] {
+            color: #111827;
+        }
+        div[data-testid="stDataFrame"] {
+            background: #ffffff;
+            border: 1px solid #dbe4ff;
+            border-radius: 10px;
+            padding: 0.3rem;
+        }
+        button[kind="primary"] {
+            background: linear-gradient(90deg, #2563eb, #7c3aed);
+            color: #ffffff;
+            border: none;
+        }
+        .stDownloadButton > button {
+            background: #ffffff;
+            color: #111827;
+            border: 1px solid #cbd5e1;
+        }
+        @media (prefers-color-scheme: dark) {
+            .stApp {
+                background: linear-gradient(180deg, #0b1220 0%, #111827 100%);
+                color: #e5e7eb;
+            }
+            h1, h2, h3 {
+                color: #f9fafb;
+            }
+            p, li, label {
+                color: #d1d5db;
+            }
+            [data-testid="stMetric"] {
+                background: #0f172a;
+                border: 1px solid #334155;
+                border-left: 4px solid #ee0000;
+                box-shadow: 0 2px 8px rgba(2, 6, 23, 0.45);
+            }
+            [data-testid="stMetricLabel"] {
+                color: #cbd5e1;
+            }
+            [data-testid="stMetricValue"] {
+                color: #f8fafc;
+            }
+            div[data-testid="stDataFrame"] {
+                background: #0f172a;
+                border: 1px solid #334155;
+            }
+            .stDownloadButton > button {
+                background: #111827;
+                color: #e5e7eb;
+                border: 1px solid #334155;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def main() -> None:
     st.set_page_config(page_title="ZTWIM Velocity Dashboard", layout="wide")
+    _apply_visual_theme()
     st.title("ZTWIM Bug Dashboard")
 
     today = datetime.now(timezone.utc).date()
