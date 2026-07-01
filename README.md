@@ -1,4 +1,4 @@
-# ZTWIM Bug Dashboard Setup Guide
+# ZTWIM Health Dashboard Setup Guide
 
 This README is written for a new contributor who cloned this repository and wants to run the report script and dashboard safely.
 
@@ -8,13 +8,18 @@ This README is written for a new contributor who cloned this repository and want
 - Saves report outputs into `Result/`.
 - Runs a Streamlit dashboard (`dashboard/app.py`) that reads `Result/` and shows:
   - bug/CVE velocity metrics,
+  - open bug tables (Engineering, Customer, CVE),
   - closed issue tables,
-  - AI-generated insights.
+  - AI-generated insights,
+  - GitHub PR velocity metrics (open PRs, closed PR split, average close time) in a dedicated tab,
+  - regression testing KPIs from `ztwim-test-framework` artifacts in a dedicated tab.
 
 ## Repository Paths You Will Use
 
 - `scripts/ztwim-quality-summary-report.py` - report generator
 - `dashboard/app.py` - Streamlit dashboard
+- `dashboard/data_source.py` - Jira/GitHub/regression data loaders
+- `dashboard/metrics_engine.py` - KPI computation for all dashboard tabs
 - `config/report-config.example.json` - safe template config
 - `config/report-config.json` - your local secret config (not committed)
 - `Result/` - generated report files (not committed)
@@ -30,6 +35,18 @@ Optional for Vertex AI insights:
 
 - `gcloud` CLI installed
 - Google account access with required org permissions
+
+Optional for GitHub PR velocity:
+
+- access to GitHub repository API (`owner/repo`)
+- `GITHUB_TOKEN` or `github_token` in config (recommended)
+
+Optional for Regression dashboard:
+
+- local path to `ztwim-test-framework` artifacts (or equivalent folder structure)
+- expected subfolders:
+  - `reports/` with `junit-*.xml` (preferred), or
+  - `test-reports/*/test-report.html` (fallback)
 
 ## Quick Start After Clone
 
@@ -52,6 +69,21 @@ Edit `config/report-config.json` and fill at least:
 
 - `jira_email`
 - `jira_token`
+
+Optional for GitHub PR velocity:
+
+- `github_repo` (default: `openshift/zero-trust-workload-identity-manager`)
+- `github_token` (recommended to avoid API rate limits)
+
+Optional for Regression dashboard:
+
+- `regression_artifacts_dir` (default: `/home/sayadas/RedHat-Workspace/ztwim-test-framework`)
+
+Optional environment overrides:
+
+- `GITHUB_REPO`
+- `GITHUB_TOKEN`
+- `ZTWIM_REGRESSION_ARTIFACTS_DIR`
 
 Then start dashboard:
 
@@ -85,14 +117,14 @@ streamlit run dashboard/app.py
 8. **Pick a date range in Filters.**  
    Dashboard looks for matching file in `Result/`; if missing, it attempts to run the Python report script automatically.
 
-9. **Read output tables and KPI cards.**  
-   KPIs summarize velocity, while engineering/customer/CVE tables show detailed closed-item records for that range.
+9. **Read output tables and KPI cards across all tabs.**  
+   Bug tab shows open + closed Jira issue views, GitHub tab shows PR velocity and open/closed PR tables, and Regression tab shows run-level KPIs with top failed/skipped tests.
 
 10. **Click “Generate Insights” for natural-language summary.**  
     The app sends computed metrics JSON to Claude (Vertex/API) and returns recommendations; fallback is used if model path is unavailable.
 
 11. **Export data if needed.**  
-    Use JSON/CSV export buttons to share the same metrics visible on screen with other team members.
+    Bug tab includes JSON/CSV exports for computed Jira velocity metrics and closure rows.
 
 12. **Keep secrets local and uncommitted.**  
     Never commit `config/report-config.json` or tokens; rotate credentials immediately if they are exposed.
@@ -188,9 +220,46 @@ If default port is busy:
 streamlit run dashboard/app.py --server.port 8502
 ```
 
+## Dashboard Tabs At a Glance
+
+### Bug Dashboard
+
+- Uses Jira-derived report data from `Result/`.
+- Shows:
+  - Overview KPIs (median/p90 close days, closed bug count)
+  - Velocity by type (Engineering Bug, Customer Bug, CVE)
+  - CVE snapshot
+  - Open issue tables (Engineering, Customer, CVE)
+  - Closed issue detail tables
+  - AI insights and export options
+
+### GitHub Dashboard
+
+- Uses GitHub Pull Request API for configured repo.
+- Shows:
+  - Open PR count (current repository state)
+  - Closed PR count in selected date window
+  - Merged vs closed-without-merge split
+  - Avg/median/p90 PR close duration
+  - Open PR table and closed PR table
+  - AI insights with repository context
+
+### Regression Dashboard
+
+- Uses regression test artifacts from configured path.
+- Ingestion order:
+  1. `reports/junit-*.xml` (preferred)
+  2. `test-reports/*/test-report.html` (fallback)
+- Shows:
+  - Regression run table (with OpenShift version when available)
+  - Most failed tests
+  - Most skipped tests
+  - Log signal summary (`logs/pytest.log` if present)
+  - AI insights based on run trends and failure/skip patterns
+
 ## How AI Insights Works
 
-When you click **Generate Insights**, the dashboard sends computed metrics (JSON) to `dashboard/claude_agent.py`.
+When you click **Generate Insights** on any tab, the dashboard sends computed metrics (JSON) and tab-specific context to `dashboard/claude_agent.py`.
 
 Insight modes:
 
@@ -199,14 +268,52 @@ Insight modes:
 3. Rule-based fallback (no external model)
 
 Default model in this project is Opus (`claude-opus-4-6`), unless overridden.
+Insight context differs by tab:
+
+- Bug tab: Jira velocity and closure/open issue context
+- GitHub tab: repository-level PR velocity context
+- Regression tab: run trend context, OpenShift version mix, and top failure/skip signals
 
 ## Dashboard Data Source Behavior
 
-- Dashboard uses `Result/` files.
-- For selected date range:
-  - if matching report exists, it loads it;
-  - if not, it tries to run the report script and generate one.
-- If generation fails (for example missing Jira creds), it falls back to the latest available `Result` file and shows limited data.
+- Bug dashboard source:
+  - prefers matching `Result/` report for selected date range;
+  - if not present, attempts to run the report script and generate it;
+  - if generation fails, falls back to latest available report with limited fidelity.
+- GitHub dashboard source:
+  - loads open PRs + closed PRs from GitHub API for selected repo;
+  - closed metrics are filtered by `closed_at` in selected date range.
+- Regression dashboard source:
+  - reads local regression artifacts path;
+  - prefers JUnit XML, falls back to pytest-html parsing;
+  - adds warnings when artifacts are missing, parsing fails, or no runs exist in selected range.
+
+## GitHub PR Velocity Behavior
+
+- GitHub PR velocity uses the same Start/End date filters from the sidebar.
+- Closed PR metrics are filtered by `closed_at` within selected range.
+- Open PR metric is current open PR count for the configured repository.
+- Closed PRs are split into:
+  - merged PRs
+  - closed without merge
+- Average PR close days = average of (`closed_at` - `created_at`) across closed PRs in range.
+- Repo source is configurable with:
+  - config: `github_repo`, `github_token`
+  - env: `GITHUB_REPO`, `GITHUB_TOKEN`
+
+## Regression Testing Dashboard Behavior
+
+- Regression dashboard uses the same Start/End date filters from the sidebar.
+- Artifacts path is configurable with:
+  - config: `regression_artifacts_dir`
+  - env: `ZTWIM_REGRESSION_ARTIFACTS_DIR`
+- Artifact ingestion order:
+  1. JUnit XML from `<artifacts_dir>/reports/junit-*.xml` (preferred)
+  2. pytest-html fallback from `<artifacts_dir>/test-reports/*/test-report.html`
+- Regression tab now shows:
+  - regression runs table (includes OpenShift version)
+  - most failed tests and most skipped tests
+  - AI insights contextualized with run trends and OpenShift version mix
 
 ## Common Problems and Fixes
 
@@ -234,6 +341,23 @@ gcloud config get-value project
 python3 -c "import claude_agent_sdk; print('claude_agent_sdk ok')"
 ```
 
+### 4) GitHub tab shows API/rate-limit warning
+
+Set a GitHub token:
+
+- config: `github_token`
+- env: `GITHUB_TOKEN`
+
+Also verify repo format is `owner/repo`.
+
+### 5) Regression tab shows no runs
+
+Check:
+
+- configured path exists (`regression_artifacts_dir` or `ZTWIM_REGRESSION_ARTIFACTS_DIR`)
+- path contains `reports/junit-*.xml` or `test-reports/*/test-report.html`
+- selected date range includes artifact timestamps
+
 ## Security and Git Hygiene (Important)
 
 - Never commit real secrets.
@@ -258,68 +382,76 @@ If any token was exposed, rotate it immediately.
 
 ## Start Date / End Date Code Flow (End-to-End)
 
-This section explains how selected date range flows through Python code, from Jira fetch to dashboard, and where Claude insights are generated.
+This section explains how selected date range flows through Python code for all three dashboard tabs.
 
 ### 1) Date range enters from UI
 
 In `dashboard/app.py`:
 
-- user selects `Start date`, `End date`, and date semantics (`resolutiondate` or `updated`)
-- those values are passed into `_load_dashboard_payload(...)`
+- user selects `Start date` and `End date`
+- optional tab inputs:
+  - `GitHub repository` (`owner/repo`)
+  - `Regression artifacts path`
+- bug tab also uses `Velocity date semantics` (`resolutiondate` or `updated`)
 
-### 2) Data source resolves report for that range
+### 2) Bug tab flow (Jira report pipeline)
 
 In `dashboard/data_source.py`:
 
-- `DataSourceHub.load(...)` calls `_load_or_generate_result_report(start_date, end_date, date_field, ...)`
-- it looks for matching file in `Result/` using `Date range: <start> to <end> (<field>)`
-- if matching file does not exist, it runs:
+- `DataSourceHub.load(...)` resolves a matching `Result/` report for selected date range
+- if no matching report exists, it attempts report generation via:
   - `scripts/ztwim-quality-summary-report.py --start-date ... --end-date ... --date-field ... --md`
-- then it parses the generated/loaded report and builds structured rows for:
-  - Engineering Bug
-  - Customer Bug
-  - CVE
-
-### 3) Jira fetch path during report generation
-
-In `scripts/ztwim-quality-summary-report.py` + `scripts/ztwim_data_layer.py`:
-
-- CLI parses `--start-date`, `--end-date`, `--date-field`
-- `build_issue_dataset(...)` performs:
-  - Jira discovery (`discover_keys_live`)
-  - fetch by keys (`fetch_by_keys`)
-  - classification (bugs/cves/other)
-  - date filtering (`filter_issues_by_date_range`)
-- report renderer writes markdown/text to `Result/` with date range label embedded
-
-### 4) Metrics computation for dashboard
+- report parser extracts:
+  - closed issue rows (Engineering, Customer, CVE)
+  - open issue rows from "Attention Needed" section when present
 
 In `dashboard/metrics_engine.py`:
 
-- `compute_velocity_metrics(...)` computes:
-  - median / p75 / p90 close days
-  - closure counts and split by type
-  - CVE/Engineering/Customer velocity summaries
-  - closure detail rows shown in tables
-  - open-age KPI is currently disabled and not included in metric output
+- `compute_velocity_metrics(...)` computes bug/CVE KPIs, type summaries, and closure rows
 
-### 5) Dashboard rendering
+### 3) GitHub tab flow (PR velocity pipeline)
 
-Back in `dashboard/app.py`:
+In `dashboard/data_source.py`:
 
-- metrics are displayed in:
-  - Overview KPIs
-  - Velocity By Type
-  - CVE Snapshot
-  - Closed Engineering Bugs table
-  - Closed Customer Bugs table
-  - Closed CVEs table
+- `load_github_pr_source(...)` calls GitHub PR API:
+  - open PR list (current state)
+  - closed PR list (filtered by selected date range)
+- supports config/env overrides for repo and token
 
-### 6) Where Claude is used for insights
+In `dashboard/metrics_engine.py`:
+
+- `compute_github_pr_velocity_metrics(...)` computes:
+  - open PR count
+  - closed PR count
+  - merged vs closed-without-merge split
+  - avg/median/p90 close days
+  - closed PR detail rows
+
+### 4) Regression tab flow (test artifacts pipeline)
+
+In `dashboard/data_source.py`:
+
+- `load_regression_test_source(...)` reads artifacts directory
+- ingestion order:
+  1. JUnit XML reports
+  2. pytest-html reports (fallback)
+- extracts per-run totals, failed/skipped test detail rows, OpenShift version (when available), and optional `pytest.log` signal summary
+
+In `dashboard/metrics_engine.py`:
+
+- `compute_regression_metrics(...)` computes:
+  - run/test totals and pass rate
+  - average per-run test outcomes
+  - duration KPIs
+  - top failed and top skipped tests
+  - failure signature aggregates
+
+### 5) AI insight generation flow
 
 In `dashboard/app.py`:
 
-- clicking **Generate Insights** calls:
+- each tab has its own **Generate Insights** button
+- button action calls:
   - `generate_insights(metrics=metrics, context=context)`
 
 In `dashboard/claude_agent.py`:
@@ -328,4 +460,4 @@ In `dashboard/claude_agent.py`:
 - otherwise tries direct Anthropic API key path
 - if neither is available, returns rule-based fallback insights
 
-So: **date range drives data selection/generation first, then metrics are computed, then Claude summarizes those computed metrics.**
+So: **selected date range drives data loading for Bug/GitHub/Regression tabs first, then each tab computes KPIs, then Claude summarizes that tab's computed metrics.**

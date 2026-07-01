@@ -50,7 +50,7 @@ def closed_date_value(issue: dict) -> date | None:
     return parse_issue_date(issue, "updated")
 
 
-def percentile(values: list[int], pct: float) -> float:
+def percentile(values: list[float], pct: float) -> float:
     if not values:
         return 0.0
     sorted_values = sorted(values)
@@ -243,4 +243,215 @@ def compute_velocity_metrics(
             }
             for r in closure_rows
         ],
+    }
+
+
+def _parse_github_datetime(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+
+
+def compute_github_pr_velocity_metrics(open_pr_count: int, closed_prs: list[dict]) -> dict:
+    close_durations_days: list[float] = []
+    merged_pr_count = 0
+    closed_pr_rows: list[dict] = []
+
+    for pr in closed_prs:
+        created_at = _parse_github_datetime(pr.get("created_at"))
+        closed_at = _parse_github_datetime(pr.get("closed_at"))
+        if not created_at or not closed_at or closed_at < created_at:
+            continue
+
+        duration_days = (closed_at - created_at).total_seconds() / 86400.0
+        close_durations_days.append(duration_days)
+        is_merged = bool(pr.get("merged_at"))
+        if is_merged:
+            merged_pr_count += 1
+
+        user = pr.get("user") or {}
+        closed_pr_rows.append(
+            {
+                "number": int(pr.get("number", 0) or 0),
+                "title": (pr.get("title") or "").strip(),
+                "author": (user.get("login") or "unknown").strip(),
+                "created_at": created_at.strftime("%Y-%m-%d"),
+                "closed_at": closed_at.strftime("%Y-%m-%d"),
+                "merged": is_merged,
+                "close_days": round(duration_days, 2),
+                "url": pr.get("html_url", ""),
+            }
+        )
+
+    closed_pr_rows.sort(key=lambda row: (row["closed_at"], row["number"]), reverse=True)
+    closed_pr_count = len(closed_pr_rows)
+    closed_unmerged_pr_count = max(closed_pr_count - merged_pr_count, 0)
+
+    if close_durations_days:
+        avg_close_days = sum(close_durations_days) / len(close_durations_days)
+        median_close_days = float(median(close_durations_days))
+        p90_close_days = percentile(close_durations_days, 0.90)
+    else:
+        avg_close_days = 0.0
+        median_close_days = 0.0
+        p90_close_days = 0.0
+
+    return {
+        "summary": {
+            "open_pr_count": int(open_pr_count),
+            "closed_pr_count": closed_pr_count,
+            "merged_pr_count": merged_pr_count,
+            "closed_unmerged_pr_count": closed_unmerged_pr_count,
+            "avg_close_days": avg_close_days,
+            "median_close_days": median_close_days,
+            "p90_close_days": p90_close_days,
+        },
+        "closed_pr_rows": closed_pr_rows,
+    }
+
+
+def compute_regression_metrics(
+    runs: list[dict],
+    start: date | None,
+    end: date | None,
+) -> dict:
+    total_tests = 0
+    passed_tests = 0
+    failed_tests = 0
+    skipped_tests = 0
+    total_duration_seconds = 0.0
+    run_rows: list[dict] = []
+    failed_test_rows: list[dict] = []
+    skipped_test_rows: list[dict] = []
+
+    for run in runs:
+        run_timestamp_raw = str(run.get("run_timestamp", "")).strip()
+        run_timestamp: datetime | None = None
+        if run_timestamp_raw:
+            try:
+                run_timestamp = datetime.fromisoformat(run_timestamp_raw)
+            except ValueError:
+                run_timestamp = None
+        if run_timestamp:
+            run_date = run_timestamp.date()
+            if start and run_date < start:
+                continue
+            if end and run_date > end:
+                continue
+
+        run_total = int(run.get("total_tests", 0) or 0)
+        run_passed = int(run.get("passed_tests", 0) or 0)
+        run_failed = int(run.get("failed_tests", 0) or 0)
+        run_skipped = int(run.get("skipped_tests", 0) or 0)
+        run_duration_seconds = float(run.get("duration_seconds", 0.0) or 0.0)
+
+        total_tests += run_total
+        passed_tests += run_passed
+        failed_tests += run_failed
+        skipped_tests += run_skipped
+        total_duration_seconds += run_duration_seconds
+
+        run_pass_rate = (run_passed * 100.0 / run_total) if run_total else 0.0
+        run_rows.append(
+            {
+                "run_id": str(run.get("run_id", "")),
+                "run_timestamp": run_timestamp_raw,
+                "suite": str(run.get("suite", "unknown")),
+                "openshift_version": str(run.get("openshift_version", "")),
+                "total_tests": run_total,
+                "passed_tests": run_passed,
+                "failed_tests": run_failed,
+                "skipped_tests": run_skipped,
+                "pass_rate_pct": round(run_pass_rate, 2),
+                "duration_minutes": round(run_duration_seconds / 60.0, 2),
+                "source_type": str(run.get("source_type", "")),
+                "source_path": str(run.get("source_path", "")),
+            }
+        )
+
+        for failure in run.get("failed_test_rows", []) or []:
+            failed_test_rows.append(
+                {
+                    "run_id": str(run.get("run_id", "")),
+                    "run_timestamp": run_timestamp_raw,
+                    "suite": str(run.get("suite", "unknown")),
+                    "test_id": str(failure.get("test_id", "")),
+                    "result": str(failure.get("result", "failed")),
+                    "duration_seconds": float(failure.get("duration_seconds", 0.0) or 0.0),
+                    "message": str(failure.get("message", "")),
+                }
+            )
+        for skipped in run.get("skipped_test_rows", []) or []:
+            skipped_test_rows.append(
+                {
+                    "run_id": str(run.get("run_id", "")),
+                    "run_timestamp": run_timestamp_raw,
+                    "suite": str(run.get("suite", "unknown")),
+                    "test_id": str(skipped.get("test_id", "")),
+                    "result": str(skipped.get("result", "skipped")),
+                    "duration_seconds": float(skipped.get("duration_seconds", 0.0) or 0.0),
+                    "message": str(skipped.get("message", "")),
+                }
+            )
+
+    run_rows.sort(key=lambda row: row["run_timestamp"], reverse=True)
+    failed_test_rows.sort(key=lambda row: (row["run_timestamp"], row["test_id"]), reverse=True)
+    skipped_test_rows.sort(key=lambda row: (row["run_timestamp"], row["test_id"]), reverse=True)
+    total_runs = len(run_rows)
+    pass_rate_pct = (passed_tests * 100.0 / total_tests) if total_tests else 0.0
+    total_duration_minutes = total_duration_seconds / 60.0
+    avg_duration_minutes = (total_duration_minutes / total_runs) if total_runs else 0.0
+    latest_run_timestamp = run_rows[0]["run_timestamp"] if run_rows else ""
+    avg_tests_per_run = (total_tests / total_runs) if total_runs else 0.0
+    avg_passed_per_run = (passed_tests / total_runs) if total_runs else 0.0
+    avg_failed_per_run = (failed_tests / total_runs) if total_runs else 0.0
+    avg_skipped_per_run = (skipped_tests / total_runs) if total_runs else 0.0
+
+    failed_counter = Counter(row["test_id"] for row in failed_test_rows if row.get("test_id"))
+    skipped_counter = Counter(row["test_id"] for row in skipped_test_rows if row.get("test_id"))
+    top_failed_tests = [
+        {"test_id": test_id, "fail_count": count}
+        for test_id, count in failed_counter.most_common(15)
+    ]
+    top_skipped_tests = [
+        {"test_id": test_id, "skip_count": count}
+        for test_id, count in skipped_counter.most_common(15)
+    ]
+
+    message_counter = Counter()
+    for row in failed_test_rows:
+        msg = (row.get("message") or "").strip()
+        if msg:
+            message_counter[msg[:180]] += 1
+    top_failure_signatures = [
+        {"message": message, "count": count}
+        for message, count in message_counter.most_common(10)
+    ]
+
+    return {
+        "summary": {
+            "total_runs": total_runs,
+            "total_tests": total_tests,
+            "total_test_executions": total_tests,
+            "passed_tests": passed_tests,
+            "failed_tests": failed_tests,
+            "skipped_tests": skipped_tests,
+            "pass_rate_pct": pass_rate_pct,
+            "total_duration_minutes": total_duration_minutes,
+            "avg_run_duration_minutes": avg_duration_minutes,
+            "avg_tests_per_run": avg_tests_per_run,
+            "avg_passed_per_run": avg_passed_per_run,
+            "avg_failed_per_run": avg_failed_per_run,
+            "avg_skipped_per_run": avg_skipped_per_run,
+            "latest_run_timestamp": latest_run_timestamp,
+        },
+        "run_rows": run_rows,
+        "failed_test_rows": failed_test_rows,
+        "skipped_test_rows": skipped_test_rows,
+        "top_failed_tests": top_failed_tests,
+        "top_skipped_tests": top_skipped_tests,
+        "top_failure_signatures": top_failure_signatures,
     }
