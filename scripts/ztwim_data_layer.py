@@ -67,6 +67,16 @@ CUSTOMER_BUG_JQL = (
     'AND component = "zero-trust-workload-identity-manager" ORDER BY created DESC'
 )
 
+CVE_JQL_SOURCES = [
+    (
+        'project = OCPBUGS AND issuetype = Vulnerability '
+        'AND component in ("zero-trust-workload-identity-manager", "spire-operator") '
+        "ORDER BY created DESC"
+    ),
+    'project = OCPBUGS AND issuetype = Vulnerability AND text ~ "spiffe-spire" ORDER BY created DESC',
+    'project = SPIRE AND summary ~ "CVE" ORDER BY created DESC',
+]
+
 CUSTOM_FIELDS: dict[str, str] = {}
 
 WANTED_FIELDS = {
@@ -244,6 +254,15 @@ def fetch_via_jql_sources(debug: bool = False) -> list[dict]:
     return all_issues
 
 
+def fetch_cve_via_jql_sources(debug: bool = False) -> list[dict]:
+    all_issues: list[dict] = []
+    for jql in CVE_JQL_SOURCES:
+        batch = jira_search(jql, debug=debug)
+        if batch:
+            all_issues.extend(batch)
+    return all_issues
+
+
 def discover_via_picker(debug: bool = False) -> set[str]:
     _ = debug
     found: set[str] = set()
@@ -269,7 +288,10 @@ def discover_via_component_api(debug: bool = False) -> set[str]:
     ztwim_comps = [
         c
         for c in comp_data
-        if "zero-trust" in c.get("name", "").lower() or "spiffe" in c.get("name", "").lower()
+        if any(
+            token in c.get("name", "").lower()
+            for token in ("zero-trust", "spiffe", "spire-operator")
+        )
     ]
     for comp in ztwim_comps:
         for jql in [
@@ -291,18 +313,27 @@ def discover_via_component_api(debug: bool = False) -> set[str]:
 def classify_issue(issue: dict) -> str:
     f = issue.get("fields", {})
     itype = (f.get("issuetype") or {}).get("name", "").lower()
-    if itype == "bug":
-        return "bugs"
+    summary = f.get("summary", "").lower()
+    comp_names = " ".join(c.get("name", "") for c in f.get("components", [])).lower()
+    key = issue.get("key", "")
+
     if itype in ("vulnerability", "cve"):
         return "cves"
+    if "cve-" in summary or "-rhel9" in comp_names:
+        return "cves"
+    if "cve" in summary and (
+        "ztwim" in summary
+        or "spire" in summary
+        or key.startswith("SPIRE-")
+        or is_ztwim_related(issue)
+    ):
+        return "cves"
+
+    if itype == "bug":
+        return "bugs"
     if itype and itype not in ("bug", "vulnerability", "cve"):
         return "other"
 
-    summary = f.get("summary", "").lower()
-    comp_names = " ".join(c.get("name", "") for c in f.get("components", [])).lower()
-    if "cve-" in summary or "-rhel9" in comp_names:
-        return "cves"
-    key = issue.get("key", "")
     if key.startswith("SPIRE-"):
         return "bugs"
     if "zero-trust-workload-identity-manager" in comp_names and "-rhel9" not in comp_names:
@@ -328,6 +359,7 @@ def discover_keys_live(debug: bool = False) -> dict[str, list[str]]:
     for source_fn, label in [
         (lambda: {i["key"] for i in fetch_via_jql_sources(debug)}, "SPIRE JQL"),
         (lambda: {i["key"] for i in jira_search(CUSTOMER_BUG_JQL, debug=debug)}, "OCPBUGS Bug JQL"),
+        (lambda: {i["key"] for i in fetch_cve_via_jql_sources(debug)}, "CVE JQL"),
         (lambda: discover_via_picker(debug), "Issue picker"),
         (lambda: discover_via_component_api(debug), "Component API"),
     ]:
@@ -341,7 +373,7 @@ def discover_keys_live(debug: bool = False) -> dict[str, list[str]]:
         return {"bugs": [], "cves": [], "other": []}
 
     fetched = fetch_by_keys(sorted(discovered))
-    ztwim = [i for i in fetched if is_ztwim_related(i)]
+    ztwim = [i for i in fetched if is_ztwim_related(i) or classify_issue(i) == "cves"]
     keys: dict[str, list[str]] = {"bugs": [], "cves": [], "other": []}
     for issue in ztwim:
         cat = classify_issue(issue)
@@ -406,6 +438,15 @@ def build_issue_dataset(
         if key and key not in known_bug_keys:
             all_bugs.append(issue)
             known_bug_keys.add(key)
+
+    known_cve_keys = {i.get("key", "") for i in all_cves}
+    for issue in fetch_cve_via_jql_sources(debug):
+        key = issue.get("key", "")
+        if key and key not in known_cve_keys and (
+            is_ztwim_related(issue) or classify_issue(issue) == "cves"
+        ):
+            all_cves.append(issue)
+            known_cve_keys.add(key)
 
     all_bugs = filter_issues_by_date_range(all_bugs, start_date, end_date, date_field)
     all_cves = filter_issues_by_date_range(all_cves, start_date, end_date, date_field)
