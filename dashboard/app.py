@@ -10,12 +10,18 @@ from datetime import datetime, timedelta, timezone
 
 import streamlit as st
 
-from claude_agent import generate_insights
+from claude_agent import generate_insights, generate_root_cause_insights
 from data_source import (
     DataSourceHub,
     default_github_repo,
+    default_rca_downstream_repo,
+    default_rca_max_bugs,
+    default_rca_test_framework_dir,
+    default_rca_upstream_org,
+    default_rca_upstream_priority_repos,
     default_regression_artifacts_dir,
     load_github_pr_source,
+    load_customer_bug_root_cause_context,
     load_regression_test_source,
 )
 from metrics_engine import (
@@ -114,6 +120,30 @@ def _load_regression_payload(start_date_iso: str, end_date_iso: str, regression_
     }
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_customer_bug_rca_payload(
+    start_date_iso: str,
+    end_date_iso: str,
+    downstream_repo: str,
+    upstream_org: str,
+    upstream_priority_repos_csv: str,
+    max_bugs: int,
+    test_framework_dir: str,
+) -> dict:
+    start_date = datetime.strptime(start_date_iso, "%Y-%m-%d").date()
+    end_date = datetime.strptime(end_date_iso, "%Y-%m-%d").date()
+    priority_repos = [item.strip() for item in upstream_priority_repos_csv.split(",") if item.strip()]
+    return load_customer_bug_root_cause_context(
+        start_date=start_date,
+        end_date=end_date,
+        max_bugs=max_bugs,
+        downstream_repo=downstream_repo.strip(),
+        upstream_org=upstream_org.strip(),
+        upstream_priority_repos=priority_repos,
+        test_framework_dir=test_framework_dir.strip(),
+    )
+
+
 def _rows_to_csv(rows: list[dict]) -> str:
     if not rows:
         return ""
@@ -128,6 +158,28 @@ def _to_date(value):
     if hasattr(value, "isoformat"):
         return value
     return datetime.strptime(str(value), "%Y-%m-%d").date()
+
+
+def _run_with_loading_animation(
+    banner_message: str,
+    spinner_message: str,
+    loader,
+    min_seconds: float = 0.4,
+):
+    loading_notice = st.empty()
+    loading_notice.markdown(
+        f'<div class="ztwim-loading-banner">{banner_message}</div>',
+        unsafe_allow_html=True,
+    )
+    started = time.perf_counter()
+    try:
+        with st.spinner(spinner_message):
+            return loader()
+    finally:
+        elapsed = time.perf_counter() - started
+        if elapsed < min_seconds:
+            time.sleep(min_seconds - elapsed)
+        loading_notice.empty()
 
 
 def _open_issue_rows(issues: list[dict]) -> list[dict]:
@@ -383,24 +435,30 @@ def main() -> None:
         st.error("Start date must be <= end date.")
         st.stop()
 
+    # Deep RCA settings are sourced from config/env, not dashboard inputs.
+    rca_downstream_repo = default_rca_downstream_repo()
+    rca_upstream_org = default_rca_upstream_org()
+    rca_upstream_priority_repos_csv = ",".join(default_rca_upstream_priority_repos())
+    rca_max_bugs = default_rca_max_bugs()
+    rca_test_framework_dir = default_rca_test_framework_dir()
+
     if refresh:
         _load_dashboard_payload.clear()
         _load_github_payload.clear()
         _load_regression_payload.clear()
+        _load_customer_bug_rca_payload.clear()
 
-    initial_loading_notice = st.empty()
-    initial_loading_notice.markdown(
-        '<div class="ztwim-loading-banner">Loading dashboard metrics. Please wait...</div>',
-        unsafe_allow_html=True,
-    )
     try:
-        with st.spinner("Loading dashboard data..."):
-            payload = _load_dashboard_payload(
+        payload = _run_with_loading_animation(
+            banner_message="Loading dashboard metrics. Please wait...",
+            spinner_message="Loading dashboard data...",
+            loader=lambda: _load_dashboard_payload(
                 start_date_iso=start_date.isoformat(),
                 end_date_iso=end_date.isoformat(),
                 date_view=date_view,
                 debug_mode=debug_mode,
-            )
+            ),
+        )
     except Exception as exc:  # pylint: disable=broad-except
         st.error(f"Failed to load dashboard data: {exc}")
         st.info(
@@ -408,8 +466,6 @@ def main() -> None:
             "`config/report-config.json` (`jira_email`, `jira_token`) or env vars."
         )
         st.stop()
-    finally:
-        initial_loading_notice.empty()
     metrics = payload["metrics"]
     issues = payload["issues"]
     summary = metrics["summary"]
@@ -529,6 +585,78 @@ def main() -> None:
                 insight_text = generate_insights(metrics=metrics, context=context)
             st.markdown(insight_text)
 
+        st.subheader("Deep Root-Cause Insights (Open Customer Bugs)")
+        st.caption(
+            "Investigates open customer bugs created in selected range using Jira details, downstream/upstream repo "
+            "evidence, and downstream e2e test-coverage gaps."
+        )
+        if st.button("Generate Deep Root-Cause Insights", key="generate_root_cause_insights_bug"):
+            try:
+                rca_payload = _run_with_loading_animation(
+                    banner_message="Loading customer bug dossiers, repo evidence, and test coverage...",
+                    spinner_message="Collecting Jira + repo evidence + test-framework coverage...",
+                    loader=lambda: _load_customer_bug_rca_payload(
+                        start_date_iso=start_date.isoformat(),
+                        end_date_iso=end_date.isoformat(),
+                        downstream_repo=rca_downstream_repo,
+                        upstream_org=rca_upstream_org,
+                        upstream_priority_repos_csv=rca_upstream_priority_repos_csv,
+                        max_bugs=rca_max_bugs,
+                        test_framework_dir=rca_test_framework_dir,
+                    ),
+                    min_seconds=0.5,
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                st.warning(f"Deep root-cause analysis is unavailable right now: {exc}")
+                rca_payload = None
+
+            if rca_payload:
+                for warning in rca_payload.get("warnings", []):
+                    st.caption(f"RCA note: {warning}")
+
+                bug_rows = []
+                for bug in rca_payload.get("bugs", []):
+                    bug_rows.append(
+                        {
+                            "key": bug.get("key", ""),
+                            "status": bug.get("status", ""),
+                            "priority": bug.get("priority", ""),
+                            "created": bug.get("created", ""),
+                            "downstream_evidence": len(bug.get("downstream_evidence", []) or []),
+                            "upstream_evidence": len(bug.get("upstream_evidence", []) or []),
+                            "test_coverage_status": (bug.get("test_coverage") or {}).get("coverage_status", "unknown"),
+                            "downstream_e2e_status": (bug.get("test_coverage") or {}).get(
+                                "downstream_e2e_coverage_status", "unknown"
+                            ),
+                            "matched_test_scenarios": len((bug.get("test_coverage") or {}).get("covered_scenarios", [])),
+                            "matched_downstream_e2e_scenarios": len(
+                                ((bug.get("test_coverage") or {}).get("downstream_e2e_covered_scenarios", []) or [])
+                            ),
+                            "summary": bug.get("summary", ""),
+                        }
+                    )
+                if bug_rows:
+                    st.dataframe(bug_rows, use_container_width=True)
+                else:
+                    st.info("No open customer bugs found for deep root-cause analysis in selected range.")
+
+                rca_context = {
+                    "date_window": {"start": start_date.isoformat(), "end": end_date.isoformat()},
+                    "selection_rule": "Open customer bugs created in selected date range",
+                    "downstream_repo": rca_payload.get("targets", {}).get("downstream_repo", rca_downstream_repo),
+                    "upstream_org": rca_payload.get("targets", {}).get("upstream_org", rca_upstream_org),
+                    "upstream_priority_repos": rca_payload.get("targets", {}).get(
+                        "upstream_priority_repos",
+                        [repo.strip() for repo in rca_upstream_priority_repos_csv.split(",") if repo.strip()],
+                    ),
+                    "test_framework_dir": rca_payload.get("targets", {}).get("test_framework_dir", rca_test_framework_dir),
+                    "test_scenario_count": rca_payload.get("targets", {}).get("test_scenario_count", 0),
+                    "test_suite_breakdown": rca_payload.get("targets", {}).get("test_suite_breakdown", {}),
+                }
+                with st.spinner("Generating deep root-cause insights..."):
+                    deep_insight_text = generate_root_cause_insights(payload=rca_payload, context=rca_context)
+                st.markdown(deep_insight_text)
+
         st.subheader("Export")
         metrics_json = json.dumps(metrics, indent=2)
         metrics_csv = _rows_to_csv(metrics["closure_rows"])
@@ -553,23 +681,19 @@ def main() -> None:
         if not github_repo:
             st.info("Set a GitHub repository in sidebar to view PR velocity.")
         else:
-            github_loading_notice = st.empty()
-            github_loading_notice.markdown(
-                '<div class="ztwim-loading-banner">Loading GitHub PR velocity data...</div>',
-                unsafe_allow_html=True,
-            )
             try:
-                with st.spinner("Loading GitHub PR velocity..."):
-                    gh_payload = _load_github_payload(
+                gh_payload = _run_with_loading_animation(
+                    banner_message="Loading GitHub PR velocity data...",
+                    spinner_message="Loading GitHub PR velocity...",
+                    loader=lambda: _load_github_payload(
                         start_date_iso=start_date.isoformat(),
                         end_date_iso=end_date.isoformat(),
                         github_repo=github_repo,
-                    )
+                    ),
+                )
             except Exception as exc:  # pylint: disable=broad-except
                 st.warning(f"GitHub velocity is unavailable right now: {exc}")
                 gh_payload = None
-            finally:
-                github_loading_notice.empty()
 
             if gh_payload:
                 gh_metrics = gh_payload["metrics"]
@@ -643,27 +767,19 @@ def main() -> None:
         if not regression_artifacts_dir:
             st.info("Set a regression artifacts path in sidebar to view regression KPIs.")
         else:
-            regression_loading_notice = st.empty()
-            regression_loading_notice.markdown(
-                '<div class="ztwim-loading-banner">Loading regression artifacts...</div>',
-                unsafe_allow_html=True,
-            )
-            regression_load_started = time.perf_counter()
             try:
-                with st.spinner("Loading regression test artifacts..."):
-                    reg_payload = _load_regression_payload(
+                reg_payload = _run_with_loading_animation(
+                    banner_message="Loading regression artifacts...",
+                    spinner_message="Loading regression test artifacts...",
+                    loader=lambda: _load_regression_payload(
                         start_date_iso=start_date.isoformat(),
                         end_date_iso=end_date.isoformat(),
                         regression_artifacts_dir=regression_artifacts_dir,
-                    )
+                    ),
+                )
             except Exception as exc:  # pylint: disable=broad-except
                 st.warning(f"Regression dashboard is unavailable right now: {exc}")
                 reg_payload = None
-            finally:
-                elapsed = time.perf_counter() - regression_load_started
-                if elapsed < 0.4:
-                    time.sleep(0.4 - elapsed)
-                regression_loading_notice.empty()
 
             if reg_payload:
                 reg_metrics = reg_payload["metrics"]
